@@ -18,7 +18,7 @@ uv run -m mcp_code_review.server
 Common flags:
 
 ```bash
-uv run -m mcp_code_review.server --parallelism 4 --concurrency-mode auto --timeout-seconds 900
+uv run -m mcp_code_review.server --parallelism 4 --concurrency-mode auto --timeout-seconds 2700
 ```
 
 ## Configure in Codex (MCP)
@@ -31,7 +31,7 @@ This registers a stdio MCP server that Codex launches when a session starts.
 
 ```bash
 codex mcp add codex-code-review -- \
-  uv run -m mcp_code_review.server --parallelism 4 --concurrency-mode auto --timeout-seconds 900
+  uv run -m mcp_code_review.server --parallelism 4 --concurrency-mode auto --timeout-seconds 2700
 ```
 
 The `codex mcp add` workflow is the supported way to add MCP servers from the CLI.
@@ -52,7 +52,7 @@ args = [
   "--concurrency-mode",
   "auto",
   "--timeout-seconds",
-  "900"
+  "2700"
 ]
 ```
 
@@ -69,7 +69,7 @@ Repository: `https://github.com/Szpadel/codex-mcp-code-review`
 ```bash
 codex mcp add codex-code-review-uvx -- \
   uvx --from git+https://github.com/Szpadel/codex-mcp-code-review \
-  python -m mcp_code_review.server --parallelism 4 --concurrency-mode auto --timeout-seconds 900
+  python -m mcp_code_review.server --parallelism 4 --concurrency-mode auto --timeout-seconds 2700
 ```
 
 ### Codex (config.toml)
@@ -88,7 +88,7 @@ args = [
   "--concurrency-mode",
   "auto",
   "--timeout-seconds",
-  "900"
+  "2700"
 ]
 ```
 
@@ -110,7 +110,7 @@ args = [
         "--concurrency-mode",
         "auto",
         "--timeout-seconds",
-        "900"
+        "2700"
       ],
       "env": {}
     }
@@ -127,7 +127,7 @@ If you want Codex to run the server directly from this source checkout, point `u
 ```bash
 codex mcp add codex-code-review-dev -- \
   uv run --project /absolute/path/to/codex-mcp-code-review -m mcp_code_review.server \
-  --parallelism 4 --concurrency-mode auto --timeout-seconds 900
+  --parallelism 4 --concurrency-mode auto --timeout-seconds 2700
 ```
 
 ### config.toml
@@ -146,7 +146,7 @@ args = [
   "--concurrency-mode",
   "auto",
   "--timeout-seconds",
-  "900"
+  "2700"
 ]
 ```
 
@@ -154,5 +154,5 @@ args = [
 
 - Tool name: `review_uncommitted_changes`.
 - Uses the native app-server review target `uncommittedChanges` (includes untracked files).
-- Default parallelism: 4. Concurrency modes: `auto`, `threads`, `processes`.
+- Default runs: 4.
 - Sandbox: read-only; approval policy: never.

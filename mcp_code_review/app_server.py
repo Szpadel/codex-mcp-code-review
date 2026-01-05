@@ -44,6 +44,10 @@ def matches_thread_turn(params: Optional[Dict[str, Any]], thread_id: str, turn_i
     return thread_matches and turn_matches
 
 
+def timeout_error(timeout_seconds: int) -> AppServerError:
+    return AppServerError(f"codex review timed out after {timeout_seconds}s")
+
+
 @dataclass
 class ReviewTracker:
     thread_id: str
@@ -92,6 +96,7 @@ class AppServerClient:
         self._stdout = process.stdout
         self._pending: Dict[str, asyncio.Future] = {}
         self._trackers: List[ReviewTracker] = []
+        self._buffer = bytearray()
         self._write_lock = asyncio.Lock()
         self._closed = asyncio.Event()
         self._reader_task = asyncio.create_task(self._reader_loop())
@@ -172,25 +177,32 @@ class AppServerClient:
         assert self._stdout is not None
         try:
             while True:
-                line = await self._stdout.readline()
-                if not line:
+                chunk = await self._stdout.read(65536)
+                if not chunk:
                     break
-                decoded = line.decode("utf-8", errors="ignore").strip()
-                if not decoded:
-                    continue
-                try:
-                    message = json.loads(decoded)
-                except json.JSONDecodeError:
-                    continue
+                self._buffer.extend(chunk)
+                while True:
+                    newline_index = self._buffer.find(b"\n")
+                    if newline_index == -1:
+                        break
+                    line = bytes(self._buffer[: newline_index + 1])
+                    del self._buffer[: newline_index + 1]
+                    decoded = line.decode("utf-8", errors="ignore").strip()
+                    if not decoded:
+                        continue
+                    try:
+                        message = json.loads(decoded)
+                    except json.JSONDecodeError:
+                        continue
 
-                if "method" in message and "id" in message:
-                    await self._handle_server_request(message)
-                    continue
-                if "id" in message:
-                    await self._handle_response(message)
-                    continue
-                if "method" in message:
-                    self._dispatch_notification(message)
+                    if "method" in message and "id" in message:
+                        await self._handle_server_request(message)
+                        continue
+                    if "id" in message:
+                        await self._handle_response(message)
+                        continue
+                    if "method" in message:
+                        self._dispatch_notification(message)
         finally:
             error = AppServerError("codex app-server closed stdout")
             for future in self._pending.values():
@@ -284,7 +296,10 @@ async def run_single_review(
         future=asyncio.get_running_loop().create_future(),
     )
     client.add_tracker(tracker)
-    review_text = await asyncio.wait_for(tracker.future, timeout=timeout_seconds)
+    try:
+        review_text = await asyncio.wait_for(tracker.future, timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        raise timeout_error(timeout_seconds) from exc
     return parse_review_output(review_text)
 
 
@@ -450,6 +465,7 @@ __all__ = [
     "ConcurrencyNotSupported",
     "is_concurrency_error",
     "matches_thread_turn",
+    "timeout_error",
     "run_reviews",
     "resolve_cwd",
     "ReviewResult",

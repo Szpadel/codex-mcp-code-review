@@ -37,25 +37,10 @@ def tool_definition() -> Dict[str, Any]:
             "type": "object",
             "properties": {
                 "cwd": {"type": "string", "description": "Repository root to review."},
-                "parallelism": {
+                "runs": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Number of parallel review runs.",
-                },
-                "concurrency_mode": {
-                    "type": "string",
-                    "enum": ["auto", "threads", "processes"],
-                    "description": "How to run parallel reviews.",
-                },
-                "timeout_seconds": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Timeout per review run in seconds.",
-                },
-                "model": {"type": "string", "description": "Override model id."},
-                "model_provider": {
-                    "type": "string",
-                    "description": "Override model provider.",
+                    "description": "Number of review runs (recommended: 4).",
                 },
             },
         },
@@ -105,16 +90,16 @@ def normalize_arguments(
 ) -> Dict[str, Any]:
     args = args or {}
     cwd = args.get("cwd")
-    parallelism = args.get("parallelism", config.default_parallelism)
+    parallelism = args.get("runs", args.get("parallelism", config.default_parallelism))
     concurrency_mode = args.get("concurrency_mode", config.default_concurrency_mode)
     timeout_seconds = args.get("timeout_seconds", config.default_timeout_seconds)
     model = args.get("model", config.default_model)
     model_provider = args.get("model_provider", config.default_model_provider)
 
-    parallelism = ensure_int(parallelism, "parallelism")
+    parallelism = ensure_int(parallelism, "runs")
     timeout_seconds = ensure_int(timeout_seconds, "timeout_seconds")
     if parallelism < 1:
-        raise ValueError("parallelism must be >= 1")
+        raise ValueError("runs must be >= 1")
     if timeout_seconds < 1:
         raise ValueError("timeout_seconds must be >= 1")
     if concurrency_mode not in {"auto", "threads", "processes"}:
@@ -186,13 +171,14 @@ async def handle_tool_call(
         )
 
     structured = format_results(results)
+    issues = sum(1 for result in results if result.verdict != "pass")
     return jsonrpc_response(
         request_id,
         {
             "content": [
                 {
                     "type": "text",
-                    "text": f"completed {len(results)} review(s)",
+                    "text": f"completed {len(results)} review(s); {issues} run(s) reported issues",
                 }
             ],
             "structuredContent": structured,
@@ -241,7 +227,7 @@ def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
     parser.add_argument("--codex-bin", default="codex")
     parser.add_argument("--parallelism", type=int, default=4)
     parser.add_argument("--concurrency-mode", default="auto", choices=["auto", "threads", "processes"])
-    parser.add_argument("--timeout-seconds", type=int, default=900)
+    parser.add_argument("--timeout-seconds", type=int, default=2700)
     parser.add_argument("--model", default=None)
     parser.add_argument("--model-provider", default=None)
     args = parser.parse_args(argv)
