@@ -1,0 +1,8 @@
+[project]
+name = "codex-mcp-code-review"
+version = "0.1.0"
+description = "MCP server for Codex app-server uncommitted code reviews"
+requires-python = ">=3.11"
+
+[tool.uv]
+package = true
