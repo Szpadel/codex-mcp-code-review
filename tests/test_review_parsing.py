@@ -1,6 +1,6 @@
 import unittest
 
-from mcp_code_review.review import parse_review_output
+from mcp_code_review.review import extract_severity_tags, parse_review_output
 
 
 class TestReviewParsing(unittest.TestCase):
@@ -24,6 +24,13 @@ class TestReviewParsing(unittest.TestCase):
         self.assertEqual(result.verdict, "comment")
         self.assertEqual(result.summary, "Looks good overall")
         self.assertEqual(result.comment_markdown, text)
+
+    def test_extract_severity_tags_dedup_and_sort(self):
+        text = "- [P10] big\n- [p2] medium\n- [P1] small\n- [P2] dup\n- [P01] padded"
+        self.assertEqual(extract_severity_tags(text), ["P1", "P2", "P10"])
+
+    def test_extract_severity_tags_none(self):
+        self.assertEqual(extract_severity_tags("no tags here"), [])
 
 
 if __name__ == "__main__":

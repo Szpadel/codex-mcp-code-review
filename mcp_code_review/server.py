@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+from collections import Counter
 import json
 import os
 import shutil
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from mcp_code_review.app_server import resolve_cwd, run_reviews
-from mcp_code_review.review import ReviewResult
+from mcp_code_review.review import ReviewResult, extract_severity_tags
 
 
 TOOL_NAME = "review_uncommitted_changes"
@@ -129,6 +130,27 @@ def format_results(results: list[ReviewResult]) -> Dict[str, Any]:
     return {"results": payload}
 
 
+def count_tagged_issue_runs(results: list[ReviewResult]) -> int:
+    return sum(1 for result in results if extract_severity_tags(result.comment_markdown))
+
+
+def format_severity_summary(results: list[ReviewResult]) -> str:
+    counts: Counter[str] = Counter()
+    for result in results:
+        for tag in extract_severity_tags(result.comment_markdown):
+            counts[tag] += 1
+    if not counts:
+        return ""
+
+    def severity_key(tag: str) -> tuple[int, str]:
+        number = tag[1:] if tag.startswith("P") else ""
+        return (int(number) if number.isdigit() else sys.maxsize, tag)
+
+    ordered = sorted(counts, key=severity_key)
+    summary = ", ".join(f"{tag}={counts[tag]}" for tag in ordered)
+    return f" ({summary})"
+
+
 async def handle_tool_call(
     request_id: Any,
     params: Dict[str, Any],
@@ -171,14 +193,18 @@ async def handle_tool_call(
         )
 
     structured = format_results(results)
-    issues = sum(1 for result in results if result.verdict != "pass")
+    issues = count_tagged_issue_runs(results)
+    severity_summary = format_severity_summary(results)
     return jsonrpc_response(
         request_id,
         {
             "content": [
                 {
                     "type": "text",
-                    "text": f"completed {len(results)} review(s); {issues} run(s) reported issues",
+                    "text": (
+                        f"completed {len(results)} review(s); {issues} run(s) reported tagged issues"
+                        f"{severity_summary}"
+                    ),
                 }
             ],
             "structuredContent": structured,

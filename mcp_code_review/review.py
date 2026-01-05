@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import json
+import re
 from typing import Optional
 
 
@@ -8,6 +9,21 @@ class ReviewResult:
     verdict: str
     summary: str
     comment_markdown: str
+
+
+SEVERITY_TAG_PATTERN = re.compile(r"\[P(\d+)\]", re.IGNORECASE)
+
+
+def extract_severity_tags(text: str) -> list[str]:
+    if not text:
+        return []
+    severities: set[int] = set()
+    for match in SEVERITY_TAG_PATTERN.finditer(text):
+        try:
+            severities.add(int(match.group(1)))
+        except ValueError:
+            continue
+    return [f"P{severity}" for severity in sorted(severities)]
 
 
 def extract_json_block(text: str) -> Optional[str]:
