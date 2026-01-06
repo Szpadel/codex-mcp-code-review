@@ -40,7 +40,7 @@ The `codex mcp add` workflow is the supported way to add MCP servers from the CL
 
 Add an MCP server entry in `~/.codex/config.toml`:
 
-```toml`
+```toml
 [mcp_servers.codex-code-review]
 command = "uv"
 args = [
