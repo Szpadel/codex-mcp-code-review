@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -151,6 +152,27 @@ def format_severity_summary(results: list[ReviewResult]) -> str:
     return f" ({summary})"
 
 
+def format_elapsed_time(elapsed_seconds: float) -> str:
+    total_seconds = max(0, int(round(elapsed_seconds)))
+    minutes, seconds = divmod(total_seconds, 60)
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def format_completion_summary(
+    review_count: int,
+    issue_runs: int,
+    severity_summary: str,
+    elapsed_seconds: float,
+) -> str:
+    elapsed_text = format_elapsed_time(elapsed_seconds)
+    return (
+        f"completed {review_count} review(s); {issue_runs} run(s) reported tagged issues"
+        f"{severity_summary}; took {elapsed_text}"
+    )
+
+
 async def handle_tool_call(
     request_id: Any,
     params: Dict[str, Any],
@@ -168,6 +190,7 @@ async def handle_tool_call(
     except ValueError as exc:
         return jsonrpc_error(request_id, -32602, str(exc))
 
+    start_time = time.monotonic()
     try:
         results = await run_reviews(
             config.codex_bin,
@@ -191,20 +214,24 @@ async def handle_tool_call(
                 "isError": True,
             },
         )
+    elapsed_seconds = time.monotonic() - start_time
 
     structured = format_results(results)
     issues = count_tagged_issue_runs(results)
     severity_summary = format_severity_summary(results)
+    summary_text = format_completion_summary(
+        len(results),
+        issues,
+        severity_summary,
+        elapsed_seconds,
+    )
     return jsonrpc_response(
         request_id,
         {
             "content": [
                 {
                     "type": "text",
-                    "text": (
-                        f"completed {len(results)} review(s); {issues} run(s) reported tagged issues"
-                        f"{severity_summary}"
-                    ),
+                    "text": summary_text,
                 }
             ],
             "structuredContent": structured,
