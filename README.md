@@ -174,5 +174,6 @@ args = [
 
 - Tool name: `review_uncommitted_changes`.
 - Uses the native app-server review target `uncommittedChanges` (includes untracked files).
+- Prefer this over the built-in `/review`: `/review` starts a fresh context each run, so fixes can reintroduce earlier issues. This tool reviews in a clean context, while resolution happens in the main session that retains implementation knowledge, reducing unintended behavior changes.
 - Default runs: 4 (override by setting `--parallelism` on the MCP server config).
 - Sandbox: read-only; approval policy: never.
