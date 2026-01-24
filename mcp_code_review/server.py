@@ -25,6 +25,7 @@ class ServerConfig:
     default_timeout_seconds: int
     default_model: Optional[str]
     default_model_provider: Optional[str]
+    default_profile: Optional[str]
 
 
 def tool_definition() -> Dict[str, Any]:
@@ -97,6 +98,7 @@ def normalize_arguments(
     timeout_seconds = args.get("timeout_seconds", config.default_timeout_seconds)
     model = args.get("model", config.default_model)
     model_provider = args.get("model_provider", config.default_model_provider)
+    profile = config.default_profile
 
     parallelism = ensure_int(parallelism, "runs")
     timeout_seconds = ensure_int(timeout_seconds, "timeout_seconds")
@@ -114,6 +116,7 @@ def normalize_arguments(
         "timeout_seconds": timeout_seconds,
         "model": model,
         "model_provider": model_provider,
+        "profile": profile,
     }
 
 
@@ -200,6 +203,7 @@ async def handle_tool_call(
             args["concurrency_mode"],
             model=args["model"],
             model_provider=args["model_provider"],
+            profile=args["profile"],
         )
     except Exception as exc:
         return jsonrpc_response(
@@ -283,6 +287,7 @@ def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
     parser.add_argument("--timeout-seconds", type=int, default=2700)
     parser.add_argument("--model", default=None)
     parser.add_argument("--model-provider", default=None)
+    parser.add_argument("--profile", default=None)
     args = parser.parse_args(argv)
     return ServerConfig(
         codex_bin=args.codex_bin,
@@ -291,6 +296,7 @@ def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
         default_timeout_seconds=args.timeout_seconds,
         default_model=args.model,
         default_model_provider=args.model_provider,
+        default_profile=args.profile,
     )
 
 

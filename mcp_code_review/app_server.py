@@ -102,10 +102,19 @@ class AppServerClient:
         self._reader_task = asyncio.create_task(self._reader_loop())
 
     @classmethod
-    async def start(cls, codex_bin: str, env: Optional[Dict[str, str]] = None) -> "AppServerClient":
+    async def start(
+        cls,
+        codex_bin: str,
+        env: Optional[Dict[str, str]] = None,
+        profile: Optional[str] = None,
+    ) -> "AppServerClient":
+        cmd = [codex_bin]
+        if profile:
+            # App-server only reads config overrides, so set the active profile via -c.
+            cmd.extend(["-c", f"profile={profile}"])
+        cmd.append("app-server")
         process = await asyncio.create_subprocess_exec(
-            codex_bin,
-            "app-server",
+            *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=None,
@@ -311,8 +320,9 @@ async def run_reviews_threads(
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
     instructions: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> List[ReviewResult]:
-    client = await AppServerClient.start(codex_bin)
+    client = await AppServerClient.start(codex_bin, profile=profile)
     try:
         await client.initialize()
         tasks = [
@@ -355,8 +365,9 @@ async def run_review_process(
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
     instructions: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> ReviewResult:
-    client = await AppServerClient.start(codex_bin)
+    client = await AppServerClient.start(codex_bin, profile=profile)
     try:
         await client.initialize()
         return await run_single_review(
@@ -379,6 +390,7 @@ async def run_reviews_processes(
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
     instructions: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> List[ReviewResult]:
     tasks = [
         asyncio.create_task(
@@ -389,6 +401,7 @@ async def run_reviews_processes(
                 model=model,
                 model_provider=model_provider,
                 instructions=instructions,
+                profile=profile,
             )
         )
         for _ in range(parallelism)
@@ -405,6 +418,7 @@ async def run_reviews(
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
     instructions: Optional[str] = None,
+    profile: Optional[str] = None,
 ) -> List[ReviewResult]:
     if parallelism < 1:
         raise ValueError("parallelism must be >= 1")
@@ -418,6 +432,7 @@ async def run_reviews(
             model=model,
             model_provider=model_provider,
             instructions=instructions,
+            profile=profile,
         )
     if concurrency_mode == "processes":
         return await run_reviews_processes(
@@ -428,6 +443,7 @@ async def run_reviews(
             model=model,
             model_provider=model_provider,
             instructions=instructions,
+            profile=profile,
         )
     if concurrency_mode != "auto":
         raise ValueError(f"unsupported concurrency mode: {concurrency_mode}")
@@ -441,6 +457,7 @@ async def run_reviews(
             model=model,
             model_provider=model_provider,
             instructions=instructions,
+            profile=profile,
         )
     except ConcurrencyNotSupported:
         return await run_reviews_processes(
@@ -451,6 +468,7 @@ async def run_reviews(
             model=model,
             model_provider=model_provider,
             instructions=instructions,
+            profile=profile,
         )
 
 
