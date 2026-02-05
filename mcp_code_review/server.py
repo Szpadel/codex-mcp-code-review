@@ -11,10 +11,27 @@ from typing import Any, Dict, Optional
 
 from mcp_code_review.app_server import resolve_cwd, run_reviews
 from mcp_code_review.review import ReviewResult, extract_severity_tags
+from mcp_code_review.spawn_guard import find_guarded_app_server_ancestor_cmdline
 
 
 TOOL_NAME = "review_uncommitted_changes"
 PROTOCOL_VERSION_FALLBACK = "2024-11-05"
+RECURSIVE_REVIEW_ERROR_TEXT = (
+    "recursive review call forbidden: this server is running inside a spawned guarded app-server"
+)
+REQUEST_CANCELLED_ERROR_CODE = -32800
+REQUEST_CANCELLED_ERROR_TEXT = "request cancelled"
+INTERNAL_ERROR_CODE = -32000
+
+
+class RecursiveReviewCallError(RuntimeError):
+    pass
+
+
+def ensure_not_recursive_review_call() -> None:
+    guarded_cmdline = find_guarded_app_server_ancestor_cmdline()
+    if guarded_cmdline is not None:
+        raise RecursiveReviewCallError(RECURSIVE_REVIEW_ERROR_TEXT)
 
 
 @dataclass(frozen=True)
@@ -176,6 +193,54 @@ def format_completion_summary(
     )
 
 
+def request_id_key(request_id: Any) -> str:
+    try:
+        return json.dumps(request_id, sort_keys=True, separators=(",", ":"))
+    except TypeError:
+        return str(request_id)
+
+
+def is_cancelled_notification(message: Dict[str, Any]) -> bool:
+    method = message.get("method")
+    if not isinstance(method, str):
+        return False
+    return method in {"notifications/cancelled", "$/cancelRequest"}
+
+
+def extract_cancelled_request_key(message: Dict[str, Any]) -> Optional[str]:
+    if not is_cancelled_notification(message):
+        return None
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return None
+    request_id = params.get("requestId")
+    if request_id is None:
+        request_id = params.get("request_id")
+    if request_id is None:
+        request_id = params.get("id")
+    if request_id is None:
+        return None
+    return request_id_key(request_id)
+
+
+def cancellation_response(request_id: Any) -> Dict[str, Any]:
+    return jsonrpc_error(request_id, REQUEST_CANCELLED_ERROR_CODE, REQUEST_CANCELLED_ERROR_TEXT)
+
+
+def internal_error_response(request_id: Any, message: str) -> Dict[str, Any]:
+    return jsonrpc_error(request_id, INTERNAL_ERROR_CODE, message)
+
+
+def remove_active_tool_call_if_current(
+    active_tool_calls: dict[str, asyncio.Task],
+    task_key: str,
+    finished_task: asyncio.Task,
+) -> None:
+    current_task = active_tool_calls.get(task_key)
+    if current_task is finished_task:
+        active_tool_calls.pop(task_key, None)
+
+
 async def handle_tool_call(
     request_id: Any,
     params: Dict[str, Any],
@@ -243,6 +308,38 @@ async def handle_tool_call(
     )
 
 
+async def run_tool_call_with_cancellation_response(
+    request_id: Any,
+    params: Dict[str, Any],
+    config: ServerConfig,
+) -> Dict[str, Any]:
+    try:
+        return await handle_tool_call(request_id, params, config)
+    except asyncio.CancelledError:
+        return cancellation_response(request_id)
+    except Exception as exc:  # pragma: no cover - defensive fallback path
+        return internal_error_response(request_id, f"review failed: {exc}")
+
+
+async def write_jsonrpc_message(payload: Dict[str, Any], lock: asyncio.Lock) -> None:
+    async with lock:
+        sys.stdout.write(json.dumps(payload))
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+
+async def run_tool_call_task(
+    request_id: Any,
+    params: Dict[str, Any],
+    config: ServerConfig,
+    write_lock: asyncio.Lock,
+) -> None:
+    response = await run_tool_call_with_cancellation_response(request_id, params, config)
+    # Once we computed a terminal response, ensure it is emitted even if the task is cancelled
+    # while waiting for the write lock.
+    await asyncio.shield(write_jsonrpc_message(response, write_lock))
+
+
 async def handle_request(
     message: Dict[str, Any],
     config: ServerConfig,
@@ -282,7 +379,7 @@ async def handle_request(
 def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
     parser = argparse.ArgumentParser(description="Codex MCP code review server")
     parser.add_argument("--codex-bin", default="codex")
-    parser.add_argument("--parallelism", type=int, default=4)
+    parser.add_argument("--parallelism", type=int, default=1)
     parser.add_argument("--concurrency-mode", default="auto", choices=["auto", "threads", "processes"])
     parser.add_argument("--timeout-seconds", type=int, default=2700)
     parser.add_argument("--model", default=None)
@@ -301,6 +398,8 @@ def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
 
 
 async def run_server(config: ServerConfig) -> None:
+    write_lock = asyncio.Lock()
+    active_tool_calls: dict[str, asyncio.Task] = {}
     while True:
         line = await asyncio.to_thread(sys.stdin.readline)
         if not line:
@@ -313,17 +412,51 @@ async def run_server(config: ServerConfig) -> None:
         except json.JSONDecodeError:
             continue
 
+        cancelled_key = extract_cancelled_request_key(message)
+        if cancelled_key is not None:
+            task = active_tool_calls.get(cancelled_key)
+            if task is not None:
+                task.cancel()
+            continue
+
+        if message.get("method") == "tools/call":
+            request_id = message.get("id")
+            task_key = request_id_key(request_id)
+            params = message.get("params") or {}
+            if not isinstance(params, dict):
+                params = {}
+            previous_task = active_tool_calls.pop(task_key, None)
+            if previous_task is not None:
+                previous_task.cancel()
+            task = asyncio.create_task(run_tool_call_task(request_id, params, config, write_lock))
+            active_tool_calls[task_key] = task
+            task.add_done_callback(
+                lambda done_task, key=task_key: remove_active_tool_call_if_current(
+                    active_tool_calls, key, done_task
+                )
+            )
+            continue
+
         response = await handle_request(message, config)
         if response is None:
             continue
-        sys.stdout.write(json.dumps(response))
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        await write_jsonrpc_message(response, write_lock)
+
+    if active_tool_calls:
+        remaining_tasks = list(active_tool_calls.values())
+        for task in remaining_tasks:
+            task.cancel()
+        await asyncio.gather(*remaining_tasks, return_exceptions=True)
 
 
 def main() -> None:
-    config = parse_args()
-    asyncio.run(run_server(config))
+    try:
+        ensure_not_recursive_review_call()
+        config = parse_args()
+        asyncio.run(run_server(config))
+    except RecursiveReviewCallError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 if __name__ == "__main__":

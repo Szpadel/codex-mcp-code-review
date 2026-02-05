@@ -6,7 +6,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from mcp_code_review.review import ReviewResult, default_review_instructions, parse_review_output
+from mcp_code_review.review import ReviewResult, parse_review_output
+from mcp_code_review.spawn_guard import SPAWN_GUARD_CONFIG_ASSIGNMENT
 
 
 class AppServerError(RuntimeError):
@@ -15,6 +16,12 @@ class AppServerError(RuntimeError):
 
 class ConcurrencyNotSupported(AppServerError):
     pass
+
+
+MCP_SERVER_LIST_ATTEMPTS = 2  # Initial attempt plus one retry.
+DISABLE_APPS_CONFIG_ASSIGNMENT = "features.apps=false"
+DISABLE_COLLAB_CONFIG_ASSIGNMENT = "features.collab=false"
+MCP_DISABLED_ERROR_TEXT = "spawned codex attempted MCP tool call; MCP servers must stay disabled"
 
 
 def is_concurrency_error(message: str) -> bool:
@@ -46,6 +53,124 @@ def matches_thread_turn(params: Optional[Dict[str, Any]], thread_id: str, turn_i
 
 def timeout_error(timeout_seconds: int) -> AppServerError:
     return AppServerError(f"codex review timed out after {timeout_seconds}s")
+
+
+def parse_mcp_server_names(raw_json: str) -> List[str]:
+    try:
+        payload = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise AppServerError("failed to parse `codex mcp list --json` output") from exc
+    if not isinstance(payload, list):
+        raise AppServerError("`codex mcp list --json` returned unexpected payload type")
+
+    names: List[str] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name and name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+async def _list_mcp_server_names_once(
+    codex_bin: str,
+    profile: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    command = [codex_bin]
+    if profile:
+        command.extend(["-c", f"profile={profile}"])
+    command.extend(["mcp", "list", "--json"])
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+    except OSError as exc:
+        raise AppServerError("failed to launch `codex mcp list --json`") from exc
+
+    stdout, stderr = await process.communicate()
+    if process.returncode != 0:
+        stderr_text = stderr.decode("utf-8", errors="ignore").strip()
+        details = f": {stderr_text}" if stderr_text else ""
+        raise AppServerError(f"`codex mcp list --json` exited with {process.returncode}{details}")
+
+    return parse_mcp_server_names(stdout.decode("utf-8", errors="ignore"))
+
+
+async def list_mcp_server_names_with_retry(
+    codex_bin: str,
+    profile: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> List[str]:
+    last_error: Optional[AppServerError] = None
+    for _ in range(MCP_SERVER_LIST_ATTEMPTS):
+        try:
+            return await _list_mcp_server_names_once(codex_bin, profile=profile, env=env)
+        except AppServerError as exc:
+            last_error = exc
+    raise AppServerError(
+        "failed to enumerate MCP servers after retry; refusing to start spawned codex app-server"
+    ) from last_error
+
+
+def build_app_server_command(
+    codex_bin: str,
+    profile: Optional[str],
+    mcp_server_names: List[str],
+) -> List[str]:
+    command = [codex_bin]
+    if profile:
+        command.extend(["-c", f"profile={profile}"])
+    command.extend(["-c", DISABLE_APPS_CONFIG_ASSIGNMENT])
+    command.extend(["-c", DISABLE_COLLAB_CONFIG_ASSIGNMENT])
+    command.extend(["-c", SPAWN_GUARD_CONFIG_ASSIGNMENT])
+    for name in mcp_server_names:
+        command.extend(["-c", f"mcp_servers.{name}.enabled=false"])
+    command.append("app-server")
+    return command
+
+
+def is_mcp_tool_call_notification(message: Dict[str, Any]) -> bool:
+    method = message.get("method")
+    if not isinstance(method, str):
+        return False
+
+    lowered_method = method.lower()
+    if lowered_method in {"item/mcptoolcall/progress", "mcp_tool_call_begin", "mcp_tool_call_end"}:
+        return True
+
+    params = message.get("params")
+    if not isinstance(params, dict):
+        return False
+
+    # app-server emits multiple event shapes across versions. Match all known variants.
+    if method == "item/completed":
+        item = params.get("item")
+        if isinstance(item, dict):
+            item_type = item.get("type")
+            if isinstance(item_type, str):
+                normalized = item_type.lower()
+                if "mcptoolcall" in normalized or "mcp_tool_call" in normalized:
+                    return True
+
+    for key in ("msg", "event", "item"):
+        nested = params.get(key)
+        if not isinstance(nested, dict):
+            continue
+        nested_type = nested.get("type")
+        if not isinstance(nested_type, str):
+            continue
+        normalized = nested_type.lower()
+        if "mcptoolcall" in normalized or "mcp_tool_call" in normalized:
+            return True
+
+    return False
 
 
 @dataclass
@@ -99,6 +224,7 @@ class AppServerClient:
         self._buffer = bytearray()
         self._write_lock = asyncio.Lock()
         self._closed = asyncio.Event()
+        self._mcp_violation_error: Optional[AppServerError] = None
         self._reader_task = asyncio.create_task(self._reader_loop())
 
     @classmethod
@@ -108,11 +234,8 @@ class AppServerClient:
         env: Optional[Dict[str, str]] = None,
         profile: Optional[str] = None,
     ) -> "AppServerClient":
-        cmd = [codex_bin]
-        if profile:
-            # App-server only reads config overrides, so set the active profile via -c.
-            cmd.extend(["-c", f"profile={profile}"])
-        cmd.append("app-server")
+        mcp_server_names = await list_mcp_server_names_with_retry(codex_bin, profile=profile, env=env)
+        cmd = build_app_server_command(codex_bin, profile, mcp_server_names)
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -155,6 +278,8 @@ class AppServerClient:
                 await self._process.wait()
 
     async def request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
+        if self._mcp_violation_error is not None:
+            raise self._mcp_violation_error
         request_id = str(uuid.uuid4())
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
@@ -165,12 +290,18 @@ class AppServerClient:
         return await future
 
     async def notify(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
+        if self._mcp_violation_error is not None:
+            raise self._mcp_violation_error
         payload = {"method": method}
         if params is not None:
             payload["params"] = params
         await self._send(payload)
 
     def add_tracker(self, tracker: ReviewTracker) -> None:
+        if self._mcp_violation_error is not None:
+            if not tracker.future.done():
+                tracker.future.set_exception(self._mcp_violation_error)
+            return
         self._trackers.append(tracker)
 
     async def _send(self, payload: Dict[str, Any]) -> None:
@@ -252,12 +383,29 @@ class AppServerClient:
             future.set_result(message.get("result"))
 
     def _dispatch_notification(self, message: Dict[str, Any]) -> None:
+        if is_mcp_tool_call_notification(message):
+            self._register_mcp_violation()
+            return
         if not self._trackers:
             return
         for tracker in list(self._trackers):
             tracker.handle_notification(message)
             if tracker.future.done():
                 self._trackers.remove(tracker)
+
+    def _register_mcp_violation(self) -> None:
+        if self._mcp_violation_error is not None:
+            return
+        error = AppServerError(MCP_DISABLED_ERROR_TEXT)
+        self._mcp_violation_error = error
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(error)
+        self._pending.clear()
+        for tracker in self._trackers:
+            if not tracker.future.done():
+                tracker.future.set_exception(error)
+        self._trackers.clear()
 
 
 async def run_single_review(
@@ -266,14 +414,11 @@ async def run_single_review(
     timeout_seconds: int,
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
-    instructions: Optional[str] = None,
 ) -> ReviewResult:
-    instructions = instructions or default_review_instructions()
     thread_params: Dict[str, Any] = {
         "cwd": cwd,
         "approvalPolicy": "never",
         "sandbox": "read-only",
-        "baseInstructions": instructions,
     }
     if model:
         thread_params["model"] = model
@@ -319,7 +464,6 @@ async def run_reviews_threads(
     timeout_seconds: int,
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
-    instructions: Optional[str] = None,
     profile: Optional[str] = None,
 ) -> List[ReviewResult]:
     client = await AppServerClient.start(codex_bin, profile=profile)
@@ -333,7 +477,6 @@ async def run_reviews_threads(
                     timeout_seconds,
                     model=model,
                     model_provider=model_provider,
-                    instructions=instructions,
                 )
             )
             for _ in range(parallelism)
@@ -364,7 +507,6 @@ async def run_review_process(
     timeout_seconds: int,
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
-    instructions: Optional[str] = None,
     profile: Optional[str] = None,
 ) -> ReviewResult:
     client = await AppServerClient.start(codex_bin, profile=profile)
@@ -376,7 +518,6 @@ async def run_review_process(
             timeout_seconds,
             model=model,
             model_provider=model_provider,
-            instructions=instructions,
         )
     finally:
         await client.close()
@@ -389,7 +530,6 @@ async def run_reviews_processes(
     timeout_seconds: int,
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
-    instructions: Optional[str] = None,
     profile: Optional[str] = None,
 ) -> List[ReviewResult]:
     tasks = [
@@ -400,7 +540,6 @@ async def run_reviews_processes(
                 timeout_seconds,
                 model=model,
                 model_provider=model_provider,
-                instructions=instructions,
                 profile=profile,
             )
         )
@@ -417,7 +556,6 @@ async def run_reviews(
     concurrency_mode: str,
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
-    instructions: Optional[str] = None,
     profile: Optional[str] = None,
 ) -> List[ReviewResult]:
     if parallelism < 1:
@@ -431,7 +569,6 @@ async def run_reviews(
             timeout_seconds,
             model=model,
             model_provider=model_provider,
-            instructions=instructions,
             profile=profile,
         )
     if concurrency_mode == "processes":
@@ -442,7 +579,6 @@ async def run_reviews(
             timeout_seconds,
             model=model,
             model_provider=model_provider,
-            instructions=instructions,
             profile=profile,
         )
     if concurrency_mode != "auto":
@@ -456,7 +592,6 @@ async def run_reviews(
             timeout_seconds,
             model=model,
             model_provider=model_provider,
-            instructions=instructions,
             profile=profile,
         )
     except ConcurrencyNotSupported:
@@ -467,7 +602,6 @@ async def run_reviews(
             timeout_seconds,
             model=model,
             model_provider=model_provider,
-            instructions=instructions,
             profile=profile,
         )
 
@@ -480,9 +614,17 @@ def resolve_cwd(path: Optional[str]) -> str:
 
 __all__ = [
     "AppServerError",
+    "DISABLE_APPS_CONFIG_ASSIGNMENT",
+    "DISABLE_COLLAB_CONFIG_ASSIGNMENT",
     "ConcurrencyNotSupported",
+    "MCP_DISABLED_ERROR_TEXT",
+    "MCP_SERVER_LIST_ATTEMPTS",
+    "build_app_server_command",
     "is_concurrency_error",
+    "is_mcp_tool_call_notification",
+    "list_mcp_server_names_with_retry",
     "matches_thread_turn",
+    "parse_mcp_server_names",
     "timeout_error",
     "run_reviews",
     "resolve_cwd",

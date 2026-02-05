@@ -13,12 +13,12 @@ Codex loads MCP servers from `~/.codex/config.toml` and supports configuring the
 
 ### Review profile (recommended)
 
-Profile example (gpt-5.2-codex, xhigh reasoning effort):
+Profile example (gpt-5.3-codex, xhigh reasoning effort):
 
 ```toml
 # ~/.codex/config.toml
 [profiles.review]
-model = "gpt-5.2-codex"
+model = "gpt-5.3-codex"
 model_reasoning_effort = "xhigh"
 ```
 
