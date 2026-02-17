@@ -6,6 +6,7 @@ from mcp_code_review.app_server import (
     AppServerError,
     DISABLE_APPS_CONFIG_ASSIGNMENT,
     DISABLE_COLLAB_CONFIG_ASSIGNMENT,
+    DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT,
     DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT,
     MCP_SERVER_LIST_ATTEMPTS,
     build_app_server_command,
@@ -46,6 +47,7 @@ class TestAppServerSpawnConfig(unittest.TestCase):
         self.assertIn("profile=review", command)
         self.assertIn(DISABLE_APPS_CONFIG_ASSIGNMENT, command)
         self.assertIn(DISABLE_COLLAB_CONFIG_ASSIGNMENT, command)
+        self.assertIn(DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT, command)
         self.assertIn(DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT, command)
         self.assertIn(SPAWN_GUARD_CONFIG_ASSIGNMENT, command)
         self.assertIn("mcp_servers.review.enabled=false", command)

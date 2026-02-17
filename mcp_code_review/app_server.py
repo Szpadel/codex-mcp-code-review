@@ -21,6 +21,7 @@ class ConcurrencyNotSupported(AppServerError):
 MCP_SERVER_LIST_ATTEMPTS = 2  # Initial attempt plus one retry.
 DISABLE_APPS_CONFIG_ASSIGNMENT = "features.apps=false"
 DISABLE_COLLAB_CONFIG_ASSIGNMENT = "features.collab=false"
+DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT = "features.multi_agent=false"
 DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT = "features.memory_tool=false"
 MCP_DISABLED_ERROR_TEXT = "spawned codex attempted MCP tool call; MCP servers must stay disabled"
 
@@ -130,6 +131,7 @@ def build_app_server_command(
         command.extend(["-c", f"profile={profile}"])
     command.extend(["-c", DISABLE_APPS_CONFIG_ASSIGNMENT])
     command.extend(["-c", DISABLE_COLLAB_CONFIG_ASSIGNMENT])
+    command.extend(["-c", DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT])
     command.extend(["-c", DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT])
     command.extend(["-c", SPAWN_GUARD_CONFIG_ASSIGNMENT])
     for name in mcp_server_names:
@@ -618,6 +620,7 @@ __all__ = [
     "AppServerError",
     "DISABLE_APPS_CONFIG_ASSIGNMENT",
     "DISABLE_COLLAB_CONFIG_ASSIGNMENT",
+    "DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT",
     "DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT",
     "ConcurrencyNotSupported",
     "MCP_DISABLED_ERROR_TEXT",
