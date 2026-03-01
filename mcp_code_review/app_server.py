@@ -24,6 +24,7 @@ DISABLE_COLLAB_CONFIG_ASSIGNMENT = "features.collab=false"
 DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT = "features.multi_agent=false"
 DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT = "features.memory_tool=false"
 MCP_DISABLED_ERROR_TEXT = "spawned codex attempted MCP tool call; MCP servers must stay disabled"
+_PREFER_PROCESS_MODE = False
 
 
 def is_concurrency_error(message: str) -> bool:
@@ -41,6 +42,16 @@ def is_concurrency_error(message: str) -> bool:
         "one active",
     ]
     return any(pattern in msg for pattern in patterns)
+
+
+def should_fallback_to_process_mode(error: Exception) -> bool:
+    if isinstance(error, AppServerError):
+        message = str(error)
+        if MCP_DISABLED_ERROR_TEXT in message:
+            return False
+        if "codex review timed out after" in message.lower():
+            return False
+    return True
 
 
 def matches_thread_turn(params: Optional[Dict[str, Any]], thread_id: str, turn_id: str) -> bool:
@@ -562,19 +573,67 @@ async def run_reviews(
     model_provider: Optional[str] = None,
     profile: Optional[str] = None,
 ) -> List[ReviewResult]:
+    global _PREFER_PROCESS_MODE
+
+    async def run_with_thread_fallback() -> List[ReviewResult]:
+        global _PREFER_PROCESS_MODE
+        try:
+            return await run_reviews_threads(
+                codex_bin,
+                cwd,
+                parallelism,
+                timeout_seconds,
+                model=model,
+                model_provider=model_provider,
+                profile=profile,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not should_fallback_to_process_mode(exc):
+                raise
+            process_results = await run_reviews_processes(
+                codex_bin,
+                cwd,
+                parallelism,
+                timeout_seconds,
+                model=model,
+                model_provider=model_provider,
+                profile=profile,
+            )
+            _PREFER_PROCESS_MODE = True
+            return process_results
+
+    async def run_with_preferred_process_mode() -> List[ReviewResult]:
+        global _PREFER_PROCESS_MODE
+        try:
+            return await run_reviews_processes(
+                codex_bin,
+                cwd,
+                parallelism,
+                timeout_seconds,
+                model=model,
+                model_provider=model_provider,
+                profile=profile,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not should_fallback_to_process_mode(exc):
+                _PREFER_PROCESS_MODE = False
+                raise
+            # Preferred process mode should not lock the server in a failing path.
+            _PREFER_PROCESS_MODE = False
+            return await run_with_thread_fallback()
+
     if parallelism < 1:
         raise ValueError("parallelism must be >= 1")
     concurrency_mode = concurrency_mode.lower()
+    use_process_mode = _PREFER_PROCESS_MODE and concurrency_mode in {"threads", "auto"}
     if concurrency_mode == "threads":
-        return await run_reviews_threads(
-            codex_bin,
-            cwd,
-            parallelism,
-            timeout_seconds,
-            model=model,
-            model_provider=model_provider,
-            profile=profile,
-        )
+        if use_process_mode:
+            return await run_with_preferred_process_mode()
+        return await run_with_thread_fallback()
     if concurrency_mode == "processes":
         return await run_reviews_processes(
             codex_bin,
@@ -588,26 +647,9 @@ async def run_reviews(
     if concurrency_mode != "auto":
         raise ValueError(f"unsupported concurrency mode: {concurrency_mode}")
 
-    try:
-        return await run_reviews_threads(
-            codex_bin,
-            cwd,
-            parallelism,
-            timeout_seconds,
-            model=model,
-            model_provider=model_provider,
-            profile=profile,
-        )
-    except ConcurrencyNotSupported:
-        return await run_reviews_processes(
-            codex_bin,
-            cwd,
-            parallelism,
-            timeout_seconds,
-            model=model,
-            model_provider=model_provider,
-            profile=profile,
-        )
+    if use_process_mode:
+        return await run_with_preferred_process_mode()
+    return await run_with_thread_fallback()
 
 
 def resolve_cwd(path: Optional[str]) -> str:

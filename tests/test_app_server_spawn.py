@@ -8,11 +8,13 @@ from mcp_code_review.app_server import (
     DISABLE_COLLAB_CONFIG_ASSIGNMENT,
     DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT,
     DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT,
+    MCP_DISABLED_ERROR_TEXT,
     MCP_SERVER_LIST_ATTEMPTS,
     build_app_server_command,
     is_mcp_tool_call_notification,
     list_mcp_server_names_with_retry,
     parse_mcp_server_names,
+    run_reviews,
     run_single_review,
 )
 from mcp_code_review.spawn_guard import SPAWN_GUARD_CONFIG_ASSIGNMENT
@@ -92,6 +94,222 @@ class TestMcpServerNameRetry(unittest.IsolatedAsyncioTestCase):
                 await list_mcp_server_names_with_retry("codex", profile=None)
 
         self.assertEqual(list_once.await_count, MCP_SERVER_LIST_ATTEMPTS)
+
+
+class TestRunReviewsFallback(unittest.IsolatedAsyncioTestCase):
+    async def test_auto_falls_back_to_process_mode_on_thread_failure(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", False),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(side_effect=AppServerError("codex app-server closed stdout")),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(return_value=["process-result"]),
+            ) as run_processes,
+        ):
+            result = await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertEqual(result, ["process-result"])
+        self.assertEqual(run_threads.await_count, 1)
+        self.assertEqual(run_processes.await_count, 1)
+
+    async def test_auto_remembers_thread_failure_and_starts_next_review_in_process_mode(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", False),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(side_effect=AppServerError("thread failure")),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(side_effect=[["first"], ["second"]]),
+            ) as run_processes,
+        ):
+            first = await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+            second = await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertEqual(first, ["first"])
+        self.assertEqual(second, ["second"])
+        self.assertEqual(run_threads.await_count, 1)
+        self.assertEqual(run_processes.await_count, 2)
+
+    async def test_threads_mode_falls_back_to_process_mode_on_failure(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", False),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(side_effect=AppServerError("thread failure")),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(return_value=["process-result"]),
+            ) as run_processes,
+        ):
+            result = await run_reviews("codex", "/tmp/repo", 2, 30, "threads")
+
+        self.assertEqual(result, ["process-result"])
+        self.assertEqual(run_threads.await_count, 1)
+        self.assertEqual(run_processes.await_count, 1)
+
+    async def test_threads_mode_uses_process_mode_when_memory_prefers_processes(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", True),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(return_value=["thread-result"]),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(return_value=["process-result"]),
+            ) as run_processes,
+        ):
+            result = await run_reviews("codex", "/tmp/repo", 2, 30, "threads")
+
+        self.assertEqual(result, ["process-result"])
+        self.assertEqual(run_threads.await_count, 0)
+        self.assertEqual(run_processes.await_count, 1)
+
+    async def test_auto_does_not_remember_process_mode_when_fallback_fails(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", False),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(side_effect=[AppServerError("thread failure"), ["thread-result"]]),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(side_effect=[AppServerError("process failure")]),
+            ) as run_processes,
+        ):
+            with self.assertRaises(AppServerError):
+                await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+            second = await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertEqual(second, ["thread-result"])
+        self.assertEqual(run_threads.await_count, 2)
+        self.assertEqual(run_processes.await_count, 1)
+
+    async def test_auto_does_not_fallback_on_mcp_policy_violation(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", False),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(side_effect=AppServerError(MCP_DISABLED_ERROR_TEXT)),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(return_value=["process-result"]),
+            ) as run_processes,
+        ):
+            with self.assertRaises(AppServerError) as ctx:
+                await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertEqual(str(ctx.exception), MCP_DISABLED_ERROR_TEXT)
+        self.assertEqual(run_threads.await_count, 1)
+        self.assertEqual(run_processes.await_count, 0)
+
+    async def test_auto_does_not_fallback_on_wrapped_mcp_policy_violation(self):
+        wrapped_error = (
+            "{'code': -32000, 'message': "
+            f"'{MCP_DISABLED_ERROR_TEXT}'"
+            "}"
+        )
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", False),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(side_effect=AppServerError(wrapped_error)),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(return_value=["process-result"]),
+            ) as run_processes,
+        ):
+            with self.assertRaises(AppServerError) as ctx:
+                await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertIn(MCP_DISABLED_ERROR_TEXT, str(ctx.exception))
+        self.assertEqual(run_threads.await_count, 1)
+        self.assertEqual(run_processes.await_count, 0)
+
+    async def test_auto_does_not_fallback_on_timeout_error(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", False),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(side_effect=AppServerError("codex review timed out after 30s")),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(return_value=["process-result"]),
+            ) as run_processes,
+        ):
+            with self.assertRaises(AppServerError) as ctx:
+                await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertIn("timed out", str(ctx.exception).lower())
+        self.assertEqual(run_threads.await_count, 1)
+        self.assertEqual(run_processes.await_count, 0)
+
+    async def test_auto_recovers_to_threads_when_preferred_process_mode_fails(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", True),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(return_value=["thread-result"]),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(side_effect=AppServerError("process failure")),
+            ) as run_processes,
+        ):
+            result = await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertEqual(result, ["thread-result"])
+        self.assertEqual(run_processes.await_count, 1)
+        self.assertEqual(run_threads.await_count, 1)
+
+    async def test_auto_preferred_process_mode_does_not_retry_threads_on_mcp_policy_violation(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", True),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(return_value=["thread-result"]),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(side_effect=AppServerError(MCP_DISABLED_ERROR_TEXT)),
+            ) as run_processes,
+        ):
+            with self.assertRaises(AppServerError) as ctx:
+                await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertEqual(str(ctx.exception), MCP_DISABLED_ERROR_TEXT)
+        self.assertEqual(run_processes.await_count, 1)
+        self.assertEqual(run_threads.await_count, 0)
+
+    async def test_auto_preferred_process_mode_clears_memory_on_hard_process_error(self):
+        with (
+            patch("mcp_code_review.app_server._PREFER_PROCESS_MODE", True),
+            patch(
+                "mcp_code_review.app_server.run_reviews_threads",
+                new=AsyncMock(return_value=["thread-result"]),
+            ) as run_threads,
+            patch(
+                "mcp_code_review.app_server.run_reviews_processes",
+                new=AsyncMock(side_effect=[AppServerError("codex review timed out after 30s")]),
+            ) as run_processes,
+        ):
+            with self.assertRaises(AppServerError) as ctx:
+                await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+            second = await run_reviews("codex", "/tmp/repo", 2, 30, "auto")
+
+        self.assertIn("timed out", str(ctx.exception).lower())
+        self.assertEqual(second, ["thread-result"])
+        self.assertEqual(run_processes.await_count, 1)
+        self.assertEqual(run_threads.await_count, 1)
 
 
 class _RecordingClient:
