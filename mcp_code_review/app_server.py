@@ -23,10 +23,13 @@ class ConcurrencyNotSupported(AppServerError):
 
 
 MCP_SERVER_LIST_ATTEMPTS = 2  # Initial attempt plus one retry.
-DISABLE_APPS_CONFIG_ASSIGNMENT = "features.apps=false"
-DISABLE_COLLAB_CONFIG_ASSIGNMENT = "features.collab=false"
-DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT = "features.multi_agent=false"
-DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT = "features.memory_tool=false"
+BANNED_APP_SERVER_FEATURES = (
+    "apps",
+    "collab",
+    "multi_agent",
+    "memory_tool",
+    "spawn_csv",
+)
 MCP_DISABLED_ERROR_TEXT = "spawned codex attempted MCP tool call; MCP servers must stay disabled"
 _PREFER_PROCESS_MODE = False
 
@@ -70,6 +73,10 @@ def matches_thread_turn(params: Optional[Dict[str, Any]], thread_id: str, turn_i
 
 def timeout_error(timeout_seconds: int) -> AppServerError:
     return AppServerError(f"codex review timed out after {timeout_seconds}s")
+
+
+def build_disabled_feature_assignments(features: tuple[str, ...]) -> List[str]:
+    return [f"features.{feature}=false" for feature in features]
 
 
 def parse_mcp_server_names(raw_json: str) -> List[str]:
@@ -144,10 +151,8 @@ def build_app_server_command(
     command = [codex_bin]
     if profile:
         command.extend(["-c", f"profile={profile}"])
-    command.extend(["-c", DISABLE_APPS_CONFIG_ASSIGNMENT])
-    command.extend(["-c", DISABLE_COLLAB_CONFIG_ASSIGNMENT])
-    command.extend(["-c", DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT])
-    command.extend(["-c", DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT])
+    for assignment in build_disabled_feature_assignments(BANNED_APP_SERVER_FEATURES):
+        command.extend(["-c", assignment])
     command.extend(["-c", SPAWN_GUARD_CONFIG_ASSIGNMENT])
     for name in mcp_server_names:
         command.extend(["-c", f"mcp_servers.{name}.enabled=false"])
@@ -690,10 +695,7 @@ def resolve_cwd(path: Optional[str]) -> str:
 
 __all__ = [
     "AppServerError",
-    "DISABLE_APPS_CONFIG_ASSIGNMENT",
-    "DISABLE_COLLAB_CONFIG_ASSIGNMENT",
-    "DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT",
-    "DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT",
+    "BANNED_APP_SERVER_FEATURES",
     "ConcurrencyNotSupported",
     "MCP_DISABLED_ERROR_TEXT",
     "MCP_SERVER_LIST_ATTEMPTS",

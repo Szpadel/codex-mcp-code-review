@@ -4,10 +4,7 @@ from unittest.mock import patch
 
 from mcp_code_review.app_server import (
     AppServerError,
-    DISABLE_APPS_CONFIG_ASSIGNMENT,
-    DISABLE_COLLAB_CONFIG_ASSIGNMENT,
-    DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT,
-    DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT,
+    BANNED_APP_SERVER_FEATURES,
     MCP_DISABLED_ERROR_TEXT,
     MCP_SERVER_LIST_ATTEMPTS,
     build_app_server_command,
@@ -47,10 +44,12 @@ class TestAppServerSpawnConfig(unittest.TestCase):
         self.assertEqual(command[0], "codex")
         self.assertEqual(command[-1], "app-server")
         self.assertIn("profile=review", command)
-        self.assertIn(DISABLE_APPS_CONFIG_ASSIGNMENT, command)
-        self.assertIn(DISABLE_COLLAB_CONFIG_ASSIGNMENT, command)
-        self.assertIn(DISABLE_MULTI_AGENT_CONFIG_ASSIGNMENT, command)
-        self.assertIn(DISABLE_MEMORY_TOOL_CONFIG_ASSIGNMENT, command)
+        self.assertEqual(
+            BANNED_APP_SERVER_FEATURES,
+            ("apps", "collab", "multi_agent", "memory_tool", "spawn_csv"),
+        )
+        for feature in BANNED_APP_SERVER_FEATURES:
+            self.assertIn(f"features.{feature}=false", command)
         self.assertIn(SPAWN_GUARD_CONFIG_ASSIGNMENT, command)
         self.assertIn("mcp_servers.review.enabled=false", command)
         self.assertIn("mcp_servers.serena.enabled=false", command)
