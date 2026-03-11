@@ -15,6 +15,8 @@ from mcp_code_review.spawn_guard import find_guarded_app_server_ancestor_cmdline
 
 
 TOOL_NAME = "review_uncommitted_changes"
+FEATURE_ADDITIONAL_REVIEW_INSTRUCTIONS = "additional_review_instructions"
+SUPPORTED_FEATURES = frozenset({FEATURE_ADDITIONAL_REVIEW_INSTRUCTIONS})
 PROTOCOL_VERSION_FALLBACK = "2024-11-05"
 RECURSIVE_REVIEW_ERROR_TEXT = (
     "recursive review call forbidden: this server is running inside a spawned guarded app-server"
@@ -43,9 +45,31 @@ class ServerConfig:
     default_model: Optional[str]
     default_model_provider: Optional[str]
     default_profile: Optional[str]
+    enabled_features: frozenset[str]
 
 
-def tool_definition() -> Dict[str, Any]:
+def is_feature_enabled(config: ServerConfig, feature: str) -> bool:
+    return feature in config.enabled_features
+
+
+def tool_definition(config: ServerConfig) -> Dict[str, Any]:
+    properties: Dict[str, Any] = {
+        "cwd": {"type": "string", "description": "Repository root to review."},
+        "runs": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Number of review runs (recommended: 4).",
+        },
+    }
+    if is_feature_enabled(config, FEATURE_ADDITIONAL_REVIEW_INSTRUCTIONS):
+        properties["additional_developer_instructions"] = {
+            "type": "string",
+            "description": (
+                "Optional additional information that may affect what should be considered "
+                "an issue during review."
+            ),
+        }
+
     return {
         "name": TOOL_NAME,
         "title": "Review uncommitted changes",
@@ -55,14 +79,7 @@ def tool_definition() -> Dict[str, Any]:
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "cwd": {"type": "string", "description": "Repository root to review."},
-                "runs": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Number of review runs (recommended: 4).",
-                },
-            },
+            "properties": properties,
         },
         "outputSchema": {
             "type": "object",
@@ -110,6 +127,7 @@ def normalize_arguments(
 ) -> Dict[str, Any]:
     args = args or {}
     cwd = args.get("cwd")
+    additional_developer_instructions = args.get("additional_developer_instructions")
     parallelism = args.get("runs", args.get("parallelism", config.default_parallelism))
     concurrency_mode = args.get("concurrency_mode", config.default_concurrency_mode)
     timeout_seconds = args.get("timeout_seconds", config.default_timeout_seconds)
@@ -125,6 +143,15 @@ def normalize_arguments(
         raise ValueError("timeout_seconds must be >= 1")
     if concurrency_mode not in {"auto", "threads", "processes"}:
         raise ValueError("concurrency_mode must be auto, threads, or processes")
+    if additional_developer_instructions is not None:
+        if not is_feature_enabled(config, FEATURE_ADDITIONAL_REVIEW_INSTRUCTIONS):
+            raise ValueError(
+                "additional_developer_instructions requires --enable "
+                "additional_review_instructions"
+            )
+        if not isinstance(additional_developer_instructions, str):
+            raise ValueError("additional_developer_instructions must be a string")
+        additional_developer_instructions = additional_developer_instructions.strip() or None
 
     return {
         "cwd": resolve_cwd(cwd),
@@ -134,6 +161,7 @@ def normalize_arguments(
         "model": model,
         "model_provider": model_provider,
         "profile": profile,
+        "additional_developer_instructions": additional_developer_instructions,
     }
 
 
@@ -269,6 +297,7 @@ async def handle_tool_call(
             model=args["model"],
             model_provider=args["model_provider"],
             profile=args["profile"],
+            additional_developer_instructions=args["additional_developer_instructions"],
         )
     except Exception as exc:
         return jsonrpc_response(
@@ -362,7 +391,7 @@ async def handle_request(
         return jsonrpc_response(request_id, result)
 
     if method == "tools/list":
-        return jsonrpc_response(request_id, {"tools": [tool_definition()]})
+        return jsonrpc_response(request_id, {"tools": [tool_definition(config)]})
 
     if method == "tools/call":
         params = message.get("params") or {}
@@ -385,6 +414,14 @@ def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
     parser.add_argument("--model", default=None)
     parser.add_argument("--model-provider", default=None)
     parser.add_argument("--profile", default=None)
+    parser.add_argument(
+        "--enable",
+        action="append",
+        default=[],
+        choices=sorted(SUPPORTED_FEATURES),
+        metavar="FEATURE",
+        help="Enable optional server features.",
+    )
     args = parser.parse_args(argv)
     return ServerConfig(
         codex_bin=args.codex_bin,
@@ -394,6 +431,7 @@ def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
         default_model=args.model,
         default_model_provider=args.model_provider,
         default_profile=args.profile,
+        enabled_features=frozenset(args.enable),
     )
 
 

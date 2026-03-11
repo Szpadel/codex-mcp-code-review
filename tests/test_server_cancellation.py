@@ -22,6 +22,7 @@ def make_config() -> ServerConfig:
         default_model=None,
         default_model_provider=None,
         default_profile=None,
+        enabled_features=frozenset(),
     )
 
 

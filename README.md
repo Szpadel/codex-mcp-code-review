@@ -44,6 +44,12 @@ codex mcp add codex-code-review -- \
 
 The `codex mcp add` workflow is the supported way to add MCP servers from the CLI. After adding the server, set `tool_timeout_sec` in `~/.codex/config.toml` (see Option B) so it is higher than `--timeout-seconds`.
 
+To enable optional extra review context support, add:
+
+```bash
+--enable additional_review_instructions
+```
+
 ### Option B: config.toml
 
 Add an MCP server entry in `~/.codex/config.toml`:
@@ -174,5 +180,12 @@ args = [
 
 - Tool name: `review_uncommitted_changes`.
 - Uses the native app-server review target `uncommittedChanges` (includes untracked files).
+- Optional server feature: start the MCP server with `--enable additional_review_instructions` to
+  expose the `additional_developer_instructions` tool argument.
+- When enabled and the argument is set, the server switches that run to a custom review target
+  prompt built from a synced copy of Codex's native uncommitted-changes instructions and appends an
+  `Additional review instructions:` section.
+- When the feature is disabled, the tool schema does not advertise
+  `additional_developer_instructions`, and requests that send it anyway are rejected.
 - Default runs: 4 (override by setting `--parallelism` on the MCP server config).
 - Sandbox: read-only; approval policy: never.

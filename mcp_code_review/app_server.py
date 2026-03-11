@@ -7,6 +7,10 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from mcp_code_review.review import ReviewResult, parse_review_output
+from mcp_code_review.review_prompts import (
+    append_additional_review_instructions,
+    build_uncommitted_changes_review_prompt,
+)
 from mcp_code_review.spawn_guard import SPAWN_GUARD_CONFIG_ASSIGNMENT
 
 
@@ -429,6 +433,7 @@ async def run_single_review(
     timeout_seconds: int,
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
+    additional_developer_instructions: Optional[str] = None,
 ) -> ReviewResult:
     thread_params: Dict[str, Any] = {
         "cwd": cwd,
@@ -446,12 +451,26 @@ async def run_single_review(
     if not thread_id:
         raise AppServerError("thread/start missing thread id")
 
+    target: Dict[str, Any] = {"type": "uncommittedChanges"}
+    if additional_developer_instructions:
+        # This intentionally mirrors codex-gitlab-code-review: issue-evaluation context belongs on
+        # the review target itself, not as generic thread-level developer instructions. Preserve
+        # native uncommitted-changes semantics by starting from the synced upstream prompt and
+        # appending the extra section.
+        target = {
+            "type": "custom",
+            "instructions": append_additional_review_instructions(
+                build_uncommitted_changes_review_prompt(),
+                additional_developer_instructions,
+            ),
+        }
+
     review_response = await client.request(
         "review/start",
         {
             "threadId": thread_id,
             "delivery": "inline",
-            "target": {"type": "uncommittedChanges"},
+            "target": target,
         },
     )
     turn_id = (review_response or {}).get("turn", {}).get("id")
@@ -480,6 +499,7 @@ async def run_reviews_threads(
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
     profile: Optional[str] = None,
+    additional_developer_instructions: Optional[str] = None,
 ) -> List[ReviewResult]:
     client = await AppServerClient.start(codex_bin, profile=profile)
     try:
@@ -492,6 +512,7 @@ async def run_reviews_threads(
                     timeout_seconds,
                     model=model,
                     model_provider=model_provider,
+                    additional_developer_instructions=additional_developer_instructions,
                 )
             )
             for _ in range(parallelism)
@@ -523,6 +544,7 @@ async def run_review_process(
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
     profile: Optional[str] = None,
+    additional_developer_instructions: Optional[str] = None,
 ) -> ReviewResult:
     client = await AppServerClient.start(codex_bin, profile=profile)
     try:
@@ -533,6 +555,7 @@ async def run_review_process(
             timeout_seconds,
             model=model,
             model_provider=model_provider,
+            additional_developer_instructions=additional_developer_instructions,
         )
     finally:
         await client.close()
@@ -546,6 +569,7 @@ async def run_reviews_processes(
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
     profile: Optional[str] = None,
+    additional_developer_instructions: Optional[str] = None,
 ) -> List[ReviewResult]:
     tasks = [
         asyncio.create_task(
@@ -556,6 +580,7 @@ async def run_reviews_processes(
                 model=model,
                 model_provider=model_provider,
                 profile=profile,
+                additional_developer_instructions=additional_developer_instructions,
             )
         )
         for _ in range(parallelism)
@@ -572,6 +597,7 @@ async def run_reviews(
     model: Optional[str] = None,
     model_provider: Optional[str] = None,
     profile: Optional[str] = None,
+    additional_developer_instructions: Optional[str] = None,
 ) -> List[ReviewResult]:
     global _PREFER_PROCESS_MODE
 
@@ -586,6 +612,7 @@ async def run_reviews(
                 model=model,
                 model_provider=model_provider,
                 profile=profile,
+                additional_developer_instructions=additional_developer_instructions,
             )
         except asyncio.CancelledError:
             raise
@@ -600,6 +627,7 @@ async def run_reviews(
                 model=model,
                 model_provider=model_provider,
                 profile=profile,
+                additional_developer_instructions=additional_developer_instructions,
             )
             _PREFER_PROCESS_MODE = True
             return process_results
@@ -615,6 +643,7 @@ async def run_reviews(
                 model=model,
                 model_provider=model_provider,
                 profile=profile,
+                additional_developer_instructions=additional_developer_instructions,
             )
         except asyncio.CancelledError:
             raise
@@ -643,6 +672,7 @@ async def run_reviews(
             model=model,
             model_provider=model_provider,
             profile=profile,
+            additional_developer_instructions=additional_developer_instructions,
         )
     if concurrency_mode != "auto":
         raise ValueError(f"unsupported concurrency mode: {concurrency_mode}")

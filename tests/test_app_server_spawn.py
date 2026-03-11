@@ -352,6 +352,43 @@ class TestRunSingleReview(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(thread_start_payload["modelProvider"], "openai")
         self.assertNotIn("baseInstructions", thread_start_payload)
 
+    async def test_review_start_uses_uncommitted_changes_without_extra_instructions(self):
+        client = _RecordingClient()
+
+        await run_single_review(
+            client,
+            cwd="/tmp/project",
+            timeout_seconds=5,
+        )
+
+        self.assertEqual(client.requests[1][0], "review/start")
+        review_start_payload = client.requests[1][1]
+        self.assertEqual(review_start_payload["delivery"], "inline")
+        self.assertEqual(review_start_payload["target"], {"type": "uncommittedChanges"})
+
+    async def test_review_start_uses_custom_prompt_with_extra_instructions(self):
+        client = _RecordingClient()
+
+        await run_single_review(
+            client,
+            cwd="/tmp/project",
+            timeout_seconds=5,
+            additional_developer_instructions="  Check generated files carefully.  ",
+        )
+
+        self.assertEqual(client.requests[1][0], "review/start")
+        review_start_payload = client.requests[1][1]
+        self.assertEqual(review_start_payload["delivery"], "inline")
+        self.assertEqual(review_start_payload["target"]["type"], "custom")
+        self.assertIn(
+            "Review the current code changes (staged, unstaged, and untracked files)",
+            review_start_payload["target"]["instructions"],
+        )
+        self.assertIn(
+            "Additional review instructions:\nCheck generated files carefully.",
+            review_start_payload["target"]["instructions"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
