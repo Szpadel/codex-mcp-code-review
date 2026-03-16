@@ -29,6 +29,7 @@ BANNED_APP_SERVER_FEATURES = (
     "multi_agent",
     "memory_tool",
     "spawn_csv",
+    "enable_fanout",
 )
 MCP_DISABLED_ERROR_TEXT = "spawned codex attempted MCP tool call; MCP servers must stay disabled"
 _PREFER_PROCESS_MODE = False

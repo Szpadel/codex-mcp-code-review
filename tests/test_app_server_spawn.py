@@ -46,7 +46,14 @@ class TestAppServerSpawnConfig(unittest.TestCase):
         self.assertIn("profile=review", command)
         self.assertEqual(
             BANNED_APP_SERVER_FEATURES,
-            ("apps", "collab", "multi_agent", "memory_tool", "spawn_csv"),
+            (
+                "apps",
+                "collab",
+                "multi_agent",
+                "memory_tool",
+                "spawn_csv",
+                "enable_fanout",
+            ),
         )
         for feature in BANNED_APP_SERVER_FEATURES:
             self.assertIn(f"features.{feature}=false", command)
