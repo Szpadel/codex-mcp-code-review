@@ -27,6 +27,7 @@ BANNED_APP_SERVER_FEATURES = (
     "apps",
     "collab",
     "multi_agent",
+    "multi_agent_v2",
     "memory_tool",
     "spawn_csv",
     "enable_fanout",
