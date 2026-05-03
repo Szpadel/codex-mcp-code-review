@@ -17,6 +17,7 @@ from mcp_code_review.spawn_guard import find_guarded_app_server_ancestor_cmdline
 TOOL_NAME = "review_uncommitted_changes"
 FEATURE_ADDITIONAL_REVIEW_INSTRUCTIONS = "additional_review_instructions"
 SUPPORTED_FEATURES = frozenset({FEATURE_ADDITIONAL_REVIEW_INSTRUCTIONS})
+DEFAULT_ENABLED_FEATURES = frozenset({FEATURE_ADDITIONAL_REVIEW_INSTRUCTIONS})
 PROTOCOL_VERSION_FALLBACK = "2024-11-05"
 RECURSIVE_REVIEW_ERROR_TEXT = (
     "recursive review call forbidden: this server is running inside a spawned guarded app-server"
@@ -146,8 +147,8 @@ def normalize_arguments(
     if additional_developer_instructions is not None:
         if not is_feature_enabled(config, FEATURE_ADDITIONAL_REVIEW_INSTRUCTIONS):
             raise ValueError(
-                "additional_developer_instructions requires --enable "
-                "additional_review_instructions"
+                "additional_developer_instructions requires "
+                "additional_review_instructions to be enabled"
             )
         if not isinstance(additional_developer_instructions, str):
             raise ValueError("additional_developer_instructions must be a string")
@@ -420,9 +421,28 @@ def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
         default=[],
         choices=sorted(SUPPORTED_FEATURES),
         metavar="FEATURE",
-        help="Enable optional server features.",
+        help=(
+            "Enable server features. Kept for compatibility with features "
+            "enabled by default."
+        ),
+    )
+    parser.add_argument(
+        "--disable",
+        action="append",
+        default=[],
+        choices=sorted(SUPPORTED_FEATURES),
+        metavar="FEATURE",
+        help="Disable server features.",
     )
     args = parser.parse_args(argv)
+    enabled = frozenset(args.enable)
+    disabled = frozenset(args.disable)
+    conflicts = enabled & disabled
+    if conflicts:
+        parser.error(
+            "features cannot be both enabled and disabled: "
+            + ", ".join(sorted(conflicts))
+        )
     return ServerConfig(
         codex_bin=args.codex_bin,
         default_parallelism=args.parallelism,
@@ -431,7 +451,7 @@ def parse_args(argv: Optional[list[str]] = None) -> ServerConfig:
         default_model=args.model,
         default_model_provider=args.model_provider,
         default_profile=args.profile,
-        enabled_features=frozenset(args.enable),
+        enabled_features=(DEFAULT_ENABLED_FEATURES | enabled) - disabled,
     )
 
 
